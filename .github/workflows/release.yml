@@ -1,0 +1,85 @@
+name: release
+on:
+  release:
+    types:
+      - published
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions/setup-go@v2
+        with:
+          go-version: '1.15'
+      - name: build-cli
+        run: |
+          make list-external-deps > dependency_tree.txt && cat dependency_tree.txt
+          make build-cli
+      - name: upload release assets
+        uses: actions/github-script@v3
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require("fs");
+            const files = [
+              "cli/build/migrate.linux-amd64.tar.gz",
+              "cli/build/migrate.linux-armv7.tar.gz",
+              "cli/build/migrate.linux-arm64.tar.gz",
+              "cli/build/migrate.darwin-amd64.tar.gz",
+              "cli/build/migrate.windows-amd64.exe.tar.gz",
+              "cli/build/migrate.windows-386.exe.tar.gz",
+              "cli/build/sha256sum.txt",
+              "dependency_tree.txt"
+            ];
+            for (let file of files) {
+              await github.repos.uploadReleaseAsset({
+                owner: context.repo.owner,
+                repo: context.repo.name,
+                release_id: ${{ github.event.release.id }},
+                data: fs.readFileSync(file)
+              });
+            }
+      - name: install fpm
+        run: |
+          gem install --no-document fpm
+      - name: build-deb
+        run: |
+          fpm -s dir \
+              -t deb \
+              -n migrate \
+              -v "$(git describe --tags 2>/dev/null | cut -c 2-)" \
+              --license MIT -m dhui@users.noreply.github.com \
+              --url https://github.com/golang-migrate/migrate \
+              --description='Database migrations' \
+              -a amd64 \
+              -p migrate.$(git describe --tags 2>/dev/null | cut -c 2-).deb \
+              --deb-no-default-config-files \
+              -f -C cli/build migrate.linux-amd64=/usr/local/bin/migrate
+      - name: install packagecloud tool
+        run: |
+          gem install package_cloud
+      - name: push to packagecloud
+        env:
+          PACKAGECLOUD_TOKEN: ${{ secrets.PACKAGECLOUD_TOKEN }}
+        run: |
+          for dist in "ubuntu/xenial" "ubuntu/bionic" "ubuntu/focal" "debian/stretch" "debian/buster"; do
+            packagecloud push "golang-migrate/migrate/${dist}"
+          done
+  docker-build:
+    runs-on: ubuntu-latest
+    env:
+      TAG_NAME: ${{ github.event.release.tag_name }}
+    steps:
+      - uses: actions/checkout@v2
+      - uses: docker/login-action@v1
+        with:
+          username: golangmigrate
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - uses: docker/build-push-action@v2
+        with:
+          push: true
+          build-args: |
+            VERSION=${{ env.TAG_NAME }}
+          tags: |
+            migrate/migrate:latest
+            migrate/migrate:${{ env.TAG_NAME }}
